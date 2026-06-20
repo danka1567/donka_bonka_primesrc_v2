@@ -644,7 +644,6 @@ async def stage2_extract_stream_urls(
                 base_url, session_id, batch, len(api_urls),
                 timeout_ms, args.reloads, args.batch_size,
                 f"Batch {batch_num}/{batch_total}",
-                is_first_batch=False,
             )
             results.extend(batch_results)
 
@@ -670,7 +669,6 @@ async def stage2_extract_stream_urls(
                 base_url, session_id, first_batch, len(api_urls),
                 timeout_ms, args.reloads, args.batch_size,
                 f"Batch 1/{batch_total} (deferred)",
-                is_first_batch=False,  # Session is already warmed up
             )
             # Insert at the beginning to maintain original order
             results = first_batch_results + results
