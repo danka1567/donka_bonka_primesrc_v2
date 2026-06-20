@@ -468,7 +468,6 @@ async def _resolve_one_flaresolverr(
     sem: asyncio.Semaphore,
     index: int,
     total: int,
-    is_first_batch: bool = False,
 ) -> dict[str, Any]:
     loop  = asyncio.get_running_loop()
     label = f"[{index:>3}/{total}]"
@@ -490,14 +489,8 @@ async def _resolve_one_flaresolverr(
                 await asyncio.sleep(delay)
 
             # ── Route Everything Directly Through FlareSolverr ──────────────────────
-            # Add a stagger delay between concurrent requests to prevent cache collision
-            # First batch needs extra time to let the session stabilize
-            if is_first_batch:
-                # For first batch, use longer stagger to ensure session is fully initialized
-                stagger_delay = (index - 1) * 1.2  # 0s, 1.2s, 2.4s, etc.
-            else:
-                # For subsequent batches, minimal stagger is sufficient
-                stagger_delay = (index % 2) * 0.5  # Alternate: 0s and 0.5s delay
+            # Add a minimal stagger delay between concurrent requests to prevent cache collision
+            stagger_delay = (index % 2) * 0.5  # Alternate: 0s and 0.5s delay
             
             if stagger_delay > 0:
                 await asyncio.sleep(stagger_delay)
@@ -574,14 +567,13 @@ async def _process_batch_fs(
     reloads: int,
     batch_size: int,
     title: str,
-    is_first_batch: bool = False,
 ) -> list[dict[str, Any]]:
     print(f"\n{title}: resolving {len(indexed_urls)} URL(s)")
     sem   = asyncio.Semaphore(batch_size)
     tasks = [
         asyncio.create_task(
             _resolve_one_flaresolverr(
-                base_url, session_id, url, timeout_ms, reloads, sem, index, total, is_first_batch
+                base_url, session_id, url, timeout_ms, reloads, sem, index, total
             )
         )
         for index, url in indexed_urls
@@ -638,13 +630,21 @@ async def stage2_extract_stream_urls(
         indexed = list(enumerate(api_urls, 1))
         batch_total = (len(indexed) + args.batch_size - 1) // args.batch_size
 
+        # Process batches 2 onwards first (warm up session), then process batch 1 last
+        # This prevents duplicate URLs in the first batch due to uninitialized session state
         for batch_num, start in enumerate(range(0, len(indexed), args.batch_size), 1):
             batch = indexed[start : start + args.batch_size]
+            
+            # Skip first batch initially, we'll process it at the end
+            if batch_num == 1 and batch_total > 1:
+                first_batch = batch
+                continue
+            
             batch_results = await _process_batch_fs(
                 base_url, session_id, batch, len(api_urls),
                 timeout_ms, args.reloads, args.batch_size,
                 f"Batch {batch_num}/{batch_total}",
-                is_first_batch=(batch_num == 1),
+                is_first_batch=False,
             )
             results.extend(batch_results)
 
@@ -662,6 +662,18 @@ async def stage2_extract_stream_urls(
                 if banned:
                     log_warn(f"Cloudflare block/ban detected in batch {batch_num} — cooling down {delay:.0f}s")
                 await asyncio.sleep(delay)
+        
+        # Now process the first batch last (session is warmed up and stable)
+        if batch_total > 1:
+            log_info("Processing initial batch (deferred to end for session stability)")
+            first_batch_results = await _process_batch_fs(
+                base_url, session_id, first_batch, len(api_urls),
+                timeout_ms, args.reloads, args.batch_size,
+                f"Batch 1/{batch_total} (deferred)",
+                is_first_batch=False,  # Session is already warmed up
+            )
+            # Insert at the beginning to maintain original order
+            results = first_batch_results + results
 
         for attempt in range(1, args.final_retries + 1):
             failed = [
