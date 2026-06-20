@@ -71,7 +71,7 @@ STAGE1_REQUEST_TIMEOUT = 20   # urllib timeout per /api/v1/s call
 STAGE2_BATCH_SIZE      = 2    # concurrent FlareSolverr requests (lowered to ease Cloudflare pressure)
 STAGE2_RELOADS         = 3    # retry attempts per failed URL
 STAGE2_FINAL_RETRIES   = 2    # extra full retry passes for still-failed keys
-STAGE2_BATCH_DELAY     = 2.0  # seconds to wait between batches (cool-down for Cloudflare)
+STAGE2_BATCH_DELAY     = 1.0  # seconds to wait between batches (reduced since session is warmed up)
 STAGE2_BAN_COOLDOWN    = 20.0 # extra seconds to wait after a batch hits an IP-ban / block error
 
 TMDB_ID_RE = re.compile(r"^\d+$")
@@ -489,12 +489,7 @@ async def _resolve_one_flaresolverr(
                 await asyncio.sleep(delay)
 
             # ── Route Everything Directly Through FlareSolverr ──────────────────────
-            # Add a minimal stagger delay between concurrent requests to prevent cache collision
-            stagger_delay = (index % 2) * 0.5  # Alternate: 0s and 0.5s delay
-            
-            if stagger_delay > 0:
-                await asyncio.sleep(stagger_delay)
-            
+            # Session is warmed up, no stagger delay needed
             try:
                 fs_resp = await loop.run_in_executor(
                     None,
@@ -637,7 +632,7 @@ async def stage2_extract_stream_urls(
         log_info("Warming up session with first batch (results will be discarded)...")
         await _process_batch_fs(
             base_url, session_id, first_batch, len(api_urls),
-            timeout_ms, args.reloads, args.batch_size,
+            timeout_ms, 0, args.batch_size,  # 0 reloads for warm-up (faster)
             "Batch 1/14 (warm-up)",
         )
         log_ok("Session warmed up, now processing all batches normally")
