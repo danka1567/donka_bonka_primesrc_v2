@@ -468,6 +468,7 @@ async def _resolve_one_flaresolverr(
     sem: asyncio.Semaphore,
     index: int,
     total: int,
+    is_first_batch: bool = False,
 ) -> dict[str, Any]:
     loop  = asyncio.get_running_loop()
     label = f"[{index:>3}/{total}]"
@@ -489,9 +490,15 @@ async def _resolve_one_flaresolverr(
                 await asyncio.sleep(delay)
 
             # ── Route Everything Directly Through FlareSolverr ──────────────────────
-            # Add a small stagger delay between concurrent requests to prevent cache collision
-            # This is much faster than creating separate sessions while still preventing duplicates
-            stagger_delay = (index % 2) * 0.5  # Alternate: 0s and 0.5s delay
+            # Add a stagger delay between concurrent requests to prevent cache collision
+            # First batch needs extra time to let the session stabilize
+            if is_first_batch:
+                # For first batch, use longer stagger to ensure session is fully initialized
+                stagger_delay = (index - 1) * 1.2  # 0s, 1.2s, 2.4s, etc.
+            else:
+                # For subsequent batches, minimal stagger is sufficient
+                stagger_delay = (index % 2) * 0.5  # Alternate: 0s and 0.5s delay
+            
             if stagger_delay > 0:
                 await asyncio.sleep(stagger_delay)
             
@@ -567,13 +574,14 @@ async def _process_batch_fs(
     reloads: int,
     batch_size: int,
     title: str,
+    is_first_batch: bool = False,
 ) -> list[dict[str, Any]]:
     print(f"\n{title}: resolving {len(indexed_urls)} URL(s)")
     sem   = asyncio.Semaphore(batch_size)
     tasks = [
         asyncio.create_task(
             _resolve_one_flaresolverr(
-                base_url, session_id, url, timeout_ms, reloads, sem, index, total
+                base_url, session_id, url, timeout_ms, reloads, sem, index, total, is_first_batch
             )
         )
         for index, url in indexed_urls
@@ -636,6 +644,7 @@ async def stage2_extract_stream_urls(
                 base_url, session_id, batch, len(api_urls),
                 timeout_ms, args.reloads, args.batch_size,
                 f"Batch {batch_num}/{batch_total}",
+                is_first_batch=(batch_num == 1),
             )
             results.extend(batch_results)
 
