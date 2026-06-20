@@ -632,7 +632,7 @@ async def stage2_extract_stream_urls(
         log_info("Warming up session with first batch (results will be discarded)...")
         await _process_batch_fs(
             base_url, session_id, first_batch, len(api_urls),
-            timeout_ms, 0, args.batch_size,  # 0 reloads for warm-up (faster)
+            timeout_ms, args.reloads, args.batch_size,
             "Batch 1/14 (warm-up)",
         )
         log_ok("Session warmed up, now processing all batches normally")
