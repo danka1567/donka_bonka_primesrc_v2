@@ -624,22 +624,20 @@ async def stage2_extract_stream_urls(
     
     await _fs_create_session(base_url, session_id)
     
-    # Warm up the session with a dummy request to prevent cache collision in first real batch
-    log_info("Warming up FlareSolverr session...")
+    # Warm up the session by running a dummy batch with 2 simple URLs
+    # This ensures the session is fully initialized before processing real data
+    log_info("Warming up FlareSolverr session with dummy batch...")
     try:
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None,
-            lambda: _fs_post(base_url, {
-                "cmd": "request.get",
-                "url": "https://primesrc.me",
-                "maxTimeout": 10000,
-                "session": session_id,
-            }),
+        dummy_batch = [
+            (0, "https://www.google.com"),
+            (0, "https://www.bing.com"),
+        ]
+        await _process_batch_fs(
+            base_url, session_id, dummy_batch, len(api_urls),
+            timeout_ms, 0, args.batch_size,
+            "Warm-up batch (dummy)",
         )
-        # Small delay to ensure session is fully stabilized
-        await asyncio.sleep(1.0)
-        log_ok("Session warmed up successfully")
+        log_ok("Session warmed up successfully with dummy batch")
     except Exception as exc:
         log_warn(f"Session warm-up failed (non-critical): {exc}")
     
@@ -650,7 +648,7 @@ async def stage2_extract_stream_urls(
         indexed = list(enumerate(api_urls, 1))
         batch_total = (len(indexed) + args.batch_size - 1) // args.batch_size
 
-        # Now process all batches normally (session is already warmed up)
+        # Now process all real batches normally (session is already warmed up)
         for batch_num, start in enumerate(range(0, len(indexed), args.batch_size), 1):
             batch = indexed[start : start + args.batch_size]
             
