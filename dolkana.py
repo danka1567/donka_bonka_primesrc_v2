@@ -623,6 +623,26 @@ async def stage2_extract_stream_urls(
     log_ok("FlareSolverr is healthy")
     
     await _fs_create_session(base_url, session_id)
+    
+    # Warm up the session with a dummy request to prevent cache collision in first real batch
+    log_info("Warming up FlareSolverr session...")
+    try:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: _fs_post(base_url, {
+                "cmd": "request.get",
+                "url": "https://primesrc.me",
+                "maxTimeout": 10000,
+                "session": session_id,
+            }),
+        )
+        # Small delay to ensure session is fully stabilized
+        await asyncio.sleep(1.0)
+        log_ok("Session warmed up successfully")
+    except Exception as exc:
+        log_warn(f"Session warm-up failed (non-critical): {exc}")
+    
     t_start = time.monotonic()
     results: list[dict[str, Any]] = []
 
@@ -630,15 +650,9 @@ async def stage2_extract_stream_urls(
         indexed = list(enumerate(api_urls, 1))
         batch_total = (len(indexed) + args.batch_size - 1) // args.batch_size
 
-        # Process batches 2 onwards first (warm up session), then process batch 1 last
-        # This prevents duplicate URLs in the first batch due to uninitialized session state
+        # Now process all batches normally (session is already warmed up)
         for batch_num, start in enumerate(range(0, len(indexed), args.batch_size), 1):
             batch = indexed[start : start + args.batch_size]
-            
-            # Skip first batch initially, we'll process it at the end
-            if batch_num == 1 and batch_total > 1:
-                first_batch = batch
-                continue
             
             batch_results = await _process_batch_fs(
                 base_url, session_id, batch, len(api_urls),
@@ -661,17 +675,6 @@ async def stage2_extract_stream_urls(
                 if banned:
                     log_warn(f"Cloudflare block/ban detected in batch {batch_num} — cooling down {delay:.0f}s")
                 await asyncio.sleep(delay)
-        
-        # Now process the first batch last (session is warmed up and stable)
-        if batch_total > 1:
-            log_info("Processing initial batch (deferred to end for session stability)")
-            first_batch_results = await _process_batch_fs(
-                base_url, session_id, first_batch, len(api_urls),
-                timeout_ms, args.reloads, args.batch_size,
-                f"Batch 1/{batch_total} (deferred)",
-            )
-            # Insert at the beginning to maintain original order
-            results = first_batch_results + results
 
         for attempt in range(1, args.final_retries + 1):
             failed = [
