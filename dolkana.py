@@ -623,24 +623,6 @@ async def stage2_extract_stream_urls(
     log_ok("FlareSolverr is healthy")
     
     await _fs_create_session(base_url, session_id)
-    
-    # Warm up the session by running a dummy batch with 2 simple URLs
-    # This ensures the session is fully initialized before processing real data
-    log_info("Warming up FlareSolverr session with dummy batch...")
-    try:
-        dummy_batch = [
-            (0, "https://www.google.com"),
-            (0, "https://www.bing.com"),
-        ]
-        await _process_batch_fs(
-            base_url, session_id, dummy_batch, len(api_urls),
-            timeout_ms, 0, args.batch_size,
-            "Warm-up batch (dummy)",
-        )
-        log_ok("Session warmed up successfully with dummy batch")
-    except Exception as exc:
-        log_warn(f"Session warm-up failed (non-critical): {exc}")
-    
     t_start = time.monotonic()
     results: list[dict[str, Any]] = []
 
@@ -648,9 +630,25 @@ async def stage2_extract_stream_urls(
         indexed = list(enumerate(api_urls, 1))
         batch_total = (len(indexed) + args.batch_size - 1) // args.batch_size
 
-        # Now process all real batches normally (session is already warmed up)
+        # Store the first batch for later re-processing
+        first_batch = indexed[0 : min(args.batch_size, len(indexed))]
+        
+        # Warm up session by running first batch (discard results)
+        log_info("Warming up session with first batch (results will be discarded)...")
+        await _process_batch_fs(
+            base_url, session_id, first_batch, len(api_urls),
+            timeout_ms, args.reloads, args.batch_size,
+            "Batch 1/14 (warm-up)",
+        )
+        log_ok("Session warmed up, now processing all batches normally")
+
+        # Now process batches 2 through N normally
         for batch_num, start in enumerate(range(0, len(indexed), args.batch_size), 1):
             batch = indexed[start : start + args.batch_size]
+            
+            # Skip first batch initially (already used for warm-up), will process it at the end
+            if batch_num == 1:
+                continue
             
             batch_results = await _process_batch_fs(
                 base_url, session_id, batch, len(api_urls),
@@ -673,6 +671,16 @@ async def stage2_extract_stream_urls(
                 if banned:
                     log_warn(f"Cloudflare block/ban detected in batch {batch_num} — cooling down {delay:.0f}s")
                 await asyncio.sleep(delay)
+        
+        # Now re-process first batch (session is warmed up, these results are kept)
+        log_info("Re-processing first batch with warmed-up session")
+        first_batch_results = await _process_batch_fs(
+            base_url, session_id, first_batch, len(api_urls),
+            timeout_ms, args.reloads, args.batch_size,
+            f"Batch 1/{batch_total} (final)",
+        )
+        # Insert at the beginning to maintain original order
+        results = first_batch_results + results
 
         for attempt in range(1, args.final_retries + 1):
             failed = [
